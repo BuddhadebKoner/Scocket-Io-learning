@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Socket.IO Dark Mode Chat</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="chat-container dark-mode">
+    <div class="chat-header">
+      <h1>Real-Time Chat</h1>
+      <p id="online-users"></p>
+    </div>
+    <ul id="messages"></ul>
+    <form id="form" action="">
+      <input id="input" autocomplete="off" placeholder="Type a message..." />
+      <button>Send</button>
+    </form>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+
+    const form = document.getElementById('form');
+    const input = document.getElementById('input');
+    const messages = document.getElementById('messages');
+    const onlineUsers = document.getElementById('online-users');
+
+    // Ask user for their username when joining
+    const username = prompt('Enter your username:');
+    socket.emit('user joined', username);
+
+    // Submit the form and send the message to the server
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (input.value) {
+        socket.emit('chat message', input.value);  // Send message to server
+        input.value = '';
+      }
+    });
+
+    // Listen for chat messages from the server
+    socket.on('chat message', ({ username, msg }) => {
+      const item = document.createElement('li');
+      item.innerHTML = `<strong>${username}:</strong> ${msg}`;
+      messages.appendChild(item);
+      window.scrollTo(0, document.body.scrollHeight);
+    });
+
+    // Listen for when a user joins
+    socket.on('user joined', ({ username, users }) => {
+      const item = document.createElement('li');
+      item.classList.add('system-message');
+      item.textContent = `${username} joined the chat`;
+      messages.appendChild(item);
+      updateOnlineUsers(users);
+    });
+
+    // Listen for when a user leaves
+    socket.on('user left', ({ username, users }) => {
+      const item = document.createElement('li');
+      item.classList.add('system-message');
+      item.textContent = `${username} left the chat`;
+      messages.appendChild(item);
+      updateOnlineUsers(users);
+    });
+
+    function updateOnlineUsers(users) {
+      onlineUsers.textContent = `Online users: ${users.join(', ')}`;
+    }
+  </script>
+</body>
+</html>
