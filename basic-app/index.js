@@ -14,7 +14,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 let users = [];
 
 io.on('connection', (socket) => {
-  console.log('A user connected');
+  // console.log('A user connected');
 
   // Handle user joining with a username
   socket.on('user joined', (username) => {
@@ -30,7 +30,7 @@ io.on('connection', (socket) => {
 
   // Handle user disconnecting
   socket.on('disconnect', () => {
-    console.log('user disconnected');
+    // console.log('user disconnected');
     users = users.filter((user) => user !== socket.username);
     io.emit('user left', { username: socket.username, users });
   });
