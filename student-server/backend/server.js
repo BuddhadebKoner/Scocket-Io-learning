@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import { createServer } from 'http';
 import { createWebSocketServer, getQuizStats } from './src/controllers/controller.js';
 import quizRoutes from './src/routes/scocket.route.js';
+import { connectRedis, closeRedis } from './src/config/redis.js';
 
 // Load environment variables
 dotenv.config();
@@ -37,13 +38,22 @@ app.get('/health', (req, res) => {
 });
 
 // Quiz statistics endpoint
-app.get('/api/quiz-stats', (req, res) => {
-  const stats = getQuizStats();
-  res.json({
-    success: true,
-    data: stats,
-    timestamp: new Date().toISOString()
-  });
+app.get('/api/quiz-stats', async (req, res) => {
+  try {
+    const stats = await getQuizStats();
+    res.json({
+      success: true,
+      data: stats,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error getting quiz stats:', error.message);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get quiz statistics',
+      error: error.message
+    });
+  }
 });
 
 // WebSocket connection info endpoint
@@ -66,13 +76,57 @@ app.use((err, req, res, next) => {
   res.status(500).json({ success: false, message: 'Server error' });
 });
 
-// Initialize WebSocket server
-const wss = createWebSocketServer(server);
+// Initialize Redis connection
+async function startServer() {
+  try {
+    // Connect to Redis (graceful degradation if Redis is not available)
+    const redisConnected = await connectRedis();
 
-console.log("Was : --> ", wss);
+    if (redisConnected) {
+      console.log('✅ Redis connected successfully');
+    } else {
+      console.log('⚠️ Starting server without Redis (performance may be reduced)');
+    }
 
-// Start server
-server.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`   Connect using: ws://localhost:${PORT}`);
-});
+    // Initialize WebSocket server
+    const wss = createWebSocketServer(server);
+    console.log("WebSocket server initialized:", !!wss);
+
+    // Start server
+    server.listen(PORT, () => {
+      console.log(`🚀 Server running on http://localhost:${PORT}`);
+      console.log(`   Connect using: ws://localhost:${PORT}`);
+      console.log(`   Redis status: ${redisConnected ? '✅ Connected' : '❌ Disconnected'}`);
+      console.log(`   Quiz API: http://localhost:${PORT}/api/quiz-stats`);
+      console.log(`   Health check: http://localhost:${PORT}/health`);
+    });
+
+    // Graceful shutdown
+    process.on('SIGINT', async () => {
+      console.log('\n🛑 Gracefully shutting down...');
+
+      // Close WebSocket connections
+      if (wss && wss.clients) {
+        wss.clients.forEach(ws => {
+          ws.close(1000, 'Server shutting down');
+        });
+      }
+
+      // Close Redis connection
+      await closeRedis();
+
+      // Close HTTP server
+      server.close(() => {
+        console.log('✅ Server closed gracefully');
+        process.exit(0);
+      });
+    });
+
+  } catch (error) {
+    console.error('❌ Failed to start server:', error.message);
+    process.exit(1);
+  }
+}
+
+// Start the server
+startServer();

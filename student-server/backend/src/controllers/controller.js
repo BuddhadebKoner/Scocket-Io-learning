@@ -1,4 +1,5 @@
 import { WebSocketServer } from 'ws';
+import { RedisHelper } from '../config/redis.js';
 
 // Sample MCQ questions
 const mcqQuestions = [
@@ -34,9 +35,53 @@ const mcqQuestions = [
    }
 ];
 
+// Cache questions in Redis on startup
+async function cacheQuestions() {
+   const cacheKey = 'quiz:questions';
+   const cached = await RedisHelper.get(cacheKey);
+
+   if (!cached) {
+      console.log('📚 Caching questions in Redis...');
+      await RedisHelper.set(cacheKey, mcqQuestions, 3600); // Cache for 1 hour
+   }
+
+   return mcqQuestions;
+}
+
+// Get questions from cache or fallback to in-memory
+async function getQuestions() {
+   try {
+      const cacheKey = 'quiz:questions';
+      const cached = await RedisHelper.get(cacheKey);
+
+      if (cached && Array.isArray(cached) && cached.length > 0) {
+         // Validate each question in the cached array
+         for (let i = 0; i < cached.length; i++) {
+            const q = cached[i];
+            if (!q || !q.question || !Array.isArray(q.options) || typeof q.correctAnswer !== 'number') {
+               console.error(`❌ Invalid cached question at index ${i}:`, q);
+               // Fall back to in-memory questions
+               console.log('📚 Using in-memory questions (invalid cached data)');
+               return mcqQuestions;
+            }
+         }
+         return cached;
+      }
+
+      // Fallback to in-memory questions
+      console.log('📚 Using in-memory questions (Redis cache miss)');
+      return mcqQuestions;
+   } catch (error) {
+      console.error('❌ Error getting questions:', error.message);
+      // Always fall back to in-memory questions
+      console.log('📚 Using in-memory questions (error fallback)');
+      return mcqQuestions;
+   }
+}
+
 // Create a new quiz session object
-function createQuizSession(ws, studentId) {
-   return {
+async function createQuizSession(ws, studentId) {
+   const session = {
       ws: ws,
       studentId: studentId,
       currentQuestionIndex: 0,
@@ -50,21 +95,85 @@ function createQuizSession(ws, studentId) {
       questionStartTime: null,
       hasAnswered: false
    };
+
+   // Cache session data in Redis (excluding ws connection)
+   const sessionData = { ...session };
+   delete sessionData.ws;
+   delete sessionData.questionTimer;
+
+   const cacheKey = `session:${studentId}`;
+   await RedisHelper.set(cacheKey, sessionData, 1800); // Cache for 30 minutes
+
+   console.log(`📝 Session created and cached for student: ${studentId}`);
+   return session;
+}
+
+// Get session from Redis or fallback to in-memory
+async function getSessionData(studentId) {
+   const cacheKey = `session:${studentId}`;
+   const sessionData = await RedisHelper.get(cacheKey);
+
+   if (sessionData) {
+      console.log(`📖 Session data loaded from cache for: ${studentId}`);
+      return sessionData;
+   }
+
+   console.log(`⚠️ No cached session found for: ${studentId}`);
+   return null;
+}
+
+// Update session in Redis
+async function updateSession(session) {
+   const sessionData = { ...session };
+   delete sessionData.ws;
+   delete sessionData.questionTimer;
+
+   const cacheKey = `session:${session.studentId}`;
+   await RedisHelper.set(cacheKey, sessionData, 1800);
+}
+
+// Remove session from Redis
+async function removeSession(studentId) {
+   const cacheKey = `session:${studentId}`;
+   await RedisHelper.del(cacheKey);
+   console.log(`🗑️ Session removed from cache: ${studentId}`);
 }
 
 // Send a question to the student
-function sendQuestion(session) {
-   if (session.currentQuestionIndex < mcqQuestions.length) {
+async function sendQuestion(session) {
+   const questions = await getQuestions();
+
+   // Validate questions array
+   if (!questions || !Array.isArray(questions)) {
+      console.error(`❌ Send question error: Invalid questions array:`, questions);
+      session.ws.send(JSON.stringify({
+         type: 'error',
+         message: 'Quiz error: Could not load questions. Please restart the quiz.'
+      }));
+      return;
+   }
+
+   if (session.currentQuestionIndex < questions.length) {
+      // Validate current question
+      const question = questions[session.currentQuestionIndex];
+      if (!question || !question.question || !Array.isArray(question.options)) {
+         console.error(`❌ Send question error: Invalid question data at index ${session.currentQuestionIndex}:`, question);
+         session.ws.send(JSON.stringify({
+            type: 'error',
+            message: 'Quiz error: Invalid question data. Please restart the quiz.'
+         }));
+         return;
+      }
+
       // Reset question state
       session.currentAttempts = 0;
       session.hasAnswered = false;
       session.questionStartTime = new Date();
 
-      const question = mcqQuestions[session.currentQuestionIndex];
       const questionData = {
          type: 'question',
          questionNumber: session.currentQuestionIndex + 1,
-         totalQuestions: mcqQuestions.length,
+         totalQuestions: questions.length,
          question: question.question,
          options: question.options,
          timeLimit: session.questionTimeLimit,
@@ -74,6 +183,9 @@ function sendQuestion(session) {
 
       session.ws.send(JSON.stringify(questionData));
       console.log(`📤 Sent question ${session.currentQuestionIndex + 1} to student ${session.studentId}`);
+
+      // Update session in cache
+      await updateSession(session);
 
       // Start the 10-second timer
       startQuestionTimer(session);
@@ -108,8 +220,30 @@ function startQuestionTimer(session) {
 }
 
 // Handle timeout for a question
-function handleTimeOut(session) {
-   const currentQuestion = mcqQuestions[session.currentQuestionIndex];
+async function handleTimeOut(session) {
+   const questions = await getQuestions();
+
+   // Validate question index and questions array
+   if (!questions || !Array.isArray(questions) || session.currentQuestionIndex >= questions.length) {
+      console.error(`❌ Timeout error: Invalid question state: questionIndex=${session.currentQuestionIndex}, questionsLength=${questions?.length}`);
+      session.ws.send(JSON.stringify({
+         type: 'error',
+         message: 'Quiz error: Invalid question state during timeout. Please restart the quiz.'
+      }));
+      return;
+   }
+
+   const currentQuestion = questions[session.currentQuestionIndex];
+
+   // Additional validation for current question
+   if (!currentQuestion || typeof currentQuestion.correctAnswer === 'undefined') {
+      console.error(`❌ Timeout error: Invalid question data:`, currentQuestion);
+      session.ws.send(JSON.stringify({
+         type: 'error',
+         message: 'Quiz error: Invalid question data during timeout. Please restart the quiz.'
+      }));
+      return;
+   }
 
    // Record as unanswered (no points)
    session.answers.push({
@@ -125,6 +259,9 @@ function handleTimeOut(session) {
    // Move to next question
    session.currentQuestionIndex++;
    session.hasAnswered = true;
+
+   // Update session in cache
+   await updateSession(session);
 
    // Send timeout feedback
    const feedback = {
@@ -209,14 +346,37 @@ function handleSubmit(session, answerIndex) {
 }
 
 // Process the final answer
-function processAnswer(session, answerIndex) {
+async function processAnswer(session, answerIndex) {
    // Clear the timer since question is answered
    if (session.questionTimer) {
       clearTimeout(session.questionTimer);
    }
 
    session.hasAnswered = true;
-   const currentQuestion = mcqQuestions[session.currentQuestionIndex];
+   const questions = await getQuestions();
+
+   // Validate question index and questions array
+   if (!questions || !Array.isArray(questions) || session.currentQuestionIndex >= questions.length) {
+      console.error(`❌ Invalid question state: questionIndex=${session.currentQuestionIndex}, questionsLength=${questions?.length}`);
+      session.ws.send(JSON.stringify({
+         type: 'error',
+         message: 'Quiz error: Invalid question state. Please restart the quiz.'
+      }));
+      return;
+   }
+
+   const currentQuestion = questions[session.currentQuestionIndex];
+
+   // Additional validation for current question
+   if (!currentQuestion || typeof currentQuestion.correctAnswer === 'undefined') {
+      console.error(`❌ Invalid question data:`, currentQuestion);
+      session.ws.send(JSON.stringify({
+         type: 'error',
+         message: 'Quiz error: Invalid question data. Please restart the quiz.'
+      }));
+      return;
+   }
+
    const isCorrect = answerIndex === currentQuestion.correctAnswer;
 
    if (isCorrect) {
@@ -234,6 +394,11 @@ function processAnswer(session, answerIndex) {
 
    console.log(`📝 Student ${session.studentId} answered question ${session.currentQuestionIndex + 1}: ${isCorrect ? 'Correct' : 'Incorrect'} (${session.currentAttempts} attempts)`);
 
+   session.currentQuestionIndex++;
+
+   // Update session in cache
+   await updateSession(session);
+
    // Send immediate feedback
    const feedback = {
       type: 'feedback',
@@ -244,53 +409,6 @@ function processAnswer(session, answerIndex) {
 
    session.ws.send(JSON.stringify(feedback));
 
-   session.currentQuestionIndex++;
-
-   // Send next question after delay
-   setTimeout(() => {
-      sendQuestion(session);
-   }, 3000);
-}
-
-// Force move to next question when max attempts reached
-function forceNextQuestion(session, lastAnswer) {
-   // Clear the timer
-   if (session.questionTimer) {
-      clearTimeout(session.questionTimer);
-   }
-
-   session.hasAnswered = true;
-   const currentQuestion = mcqQuestions[session.currentQuestionIndex];
-   const isCorrect = lastAnswer === currentQuestion.correctAnswer;
-
-   if (isCorrect) {
-      session.score++;
-   }
-
-   session.answers.push({
-      questionId: currentQuestion.id,
-      selectedAnswer: lastAnswer,
-      correctAnswer: currentQuestion.correctAnswer,
-      isCorrect: isCorrect,
-      attempts: session.currentAttempts,
-      maxAttemptsReached: true,
-      timeTaken: Math.round((new Date() - session.questionStartTime) / 1000)
-   });
-
-   console.log(`🚫 Student ${session.studentId} reached max attempts on question ${session.currentQuestionIndex + 1}`);
-
-   // Send feedback
-   const feedback = {
-      type: 'feedback',
-      isCorrect: isCorrect,
-      explanation: `Max attempts reached! Moving to next question...`,
-      maxAttemptsReached: true
-   };
-
-   session.ws.send(JSON.stringify(feedback));
-
-   session.currentQuestionIndex++;
-
    // Send next question after delay
    setTimeout(() => {
       sendQuestion(session);
@@ -298,14 +416,31 @@ function forceNextQuestion(session, lastAnswer) {
 }
 
 // Send final results to student
-function sendResults(session) {
+async function sendResults(session) {
+   const questions = await getQuestions();
    const endTime = new Date();
    const totalTime = Math.round((endTime - session.startTime) / 1000); // in seconds
-   const percentage = Math.round((session.score / mcqQuestions.length) * 100);
+   const percentage = Math.round((session.score / questions.length) * 100);
+
+   // Add to leaderboard
+   const leaderboardKey = 'quiz:leaderboard';
+   const leaderboardEntry = JSON.stringify({
+      studentId: session.studentId,
+      score: session.score,
+      totalQuestions: questions.length,
+      percentage: percentage,
+      totalTime: totalTime,
+      completedAt: endTime.toISOString()
+   });
+
+   await RedisHelper.zadd(leaderboardKey, percentage, leaderboardEntry);
+
+   // Update quiz statistics
+   await updateQuizStats(session.score, percentage, totalTime);
 
    // Create detailed answer breakdown
    const answerBreakdown = session.answers.map((answer, index) => {
-      const question = mcqQuestions.find(q => q.id === answer.questionId);
+      const question = questions.find(q => q.id === answer.questionId);
       return {
          questionNumber: index + 1,
          question: question.question,
@@ -320,25 +455,32 @@ function sendResults(session) {
       };
    });
 
+   // Get top 5 leaderboard
+   const topScores = await getTopScores(5);
+
    const results = {
       type: 'results',
       score: session.score,
-      totalQuestions: mcqQuestions.length,
+      totalQuestions: questions.length,
       percentage: percentage,
       totalTime: totalTime,
       answers: session.answers, // Keep original for backend reference
       answerBreakdown: answerBreakdown, // Detailed breakdown for frontend
       message: getGradeMessage(percentage),
+      leaderboard: topScores,
       summary: {
          correct: session.score,
-         incorrect: mcqQuestions.length - session.score,
+         incorrect: questions.length - session.score,
          timeouts: session.answers.filter(a => a.timedOut).length,
          maxAttemptsReached: session.answers.filter(a => a.maxAttemptsReached).length
       }
    };
 
    session.ws.send(JSON.stringify(results));
-   console.log(`🎯 Quiz completed for student ${session.studentId}: ${session.score}/${mcqQuestions.length} (${percentage}%)`);
+   console.log(`🎯 Quiz completed for student ${session.studentId}: ${session.score}/${questions.length} (${percentage}%)`);
+
+   // Update session in cache one final time
+   await updateSession(session);
 
    // Close connection after results
    setTimeout(() => {
@@ -354,21 +496,85 @@ function getGradeMessage(percentage) {
    if (percentage >= 70) return "👍 Good work! Above average!";
    if (percentage >= 60) return "📈 Fair performance. Keep studying!";
    return "📚 Need improvement. Please review the topics.";
-}// Store active quiz sessions
+}
+
+// Update quiz statistics in Redis
+async function updateQuizStats(score, percentage, totalTime) {
+   try {
+      // Increment counters
+      await RedisHelper.incr('quiz:stats:total_attempts');
+
+      if (percentage >= 70) {
+         await RedisHelper.incr('quiz:stats:passed');
+      }
+
+      // Update average score (simplified)
+      const avgKey = 'quiz:stats:average_score';
+      const currentAvg = await RedisHelper.get(avgKey) || 0;
+      const totalAttempts = await RedisHelper.get('quiz:stats:total_attempts') || 1;
+      const newAvg = ((currentAvg * (totalAttempts - 1)) + percentage) / totalAttempts;
+      await RedisHelper.set(avgKey, Math.round(newAvg * 100) / 100);
+
+      console.log(`📊 Updated quiz statistics: Score ${score}, Percentage ${percentage}%`);
+   } catch (error) {
+      console.error('❌ Error updating quiz stats:', error.message);
+   }
+}
+
+// Get top scores from leaderboard
+async function getTopScores(limit = 10) {
+   try {
+      const leaderboardKey = 'quiz:leaderboard';
+      const topEntries = await RedisHelper.zrevrange(leaderboardKey, 0, limit - 1);
+
+      const leaderboard = [];
+      for (let i = 0; i < topEntries.length; i++) {
+         const entry = topEntries[i];
+         try {
+            const entryData = JSON.parse(entry.value);
+            leaderboard.push({
+               rank: i + 1,
+               studentId: entryData.studentId.substring(0, 12) + '...', // Anonymize
+               score: entryData.score,
+               totalQuestions: entryData.totalQuestions,
+               percentage: entry.score,
+               completedAt: entryData.completedAt
+            });
+         } catch (parseError) {
+            console.error('❌ Error parsing leaderboard entry:', parseError.message);
+         }
+      }
+
+      return leaderboard;
+   } catch (error) {
+      console.error('❌ Error getting leaderboard:', error.message);
+      return [];
+   }
+}// Store active quiz sessions (in-memory for WebSocket connections)
 const activeSessions = new Map();
 
 export function createWebSocketServer(server) {
    const wss = new WebSocketServer({ server });
 
-   wss.on('connection', (ws, req) => {
+   // Cache questions on startup
+   cacheQuestions().then(() => {
+      console.log('📚 Questions cached successfully');
+   }).catch(err => {
+      console.error('❌ Error caching questions:', err.message);
+   });
+
+   wss.on('connection', async (ws, req) => {
       // Generate a unique student ID
       const studentId = `student_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
       console.log(`🔗 New student connected: ${studentId}`);
       console.log(`👥 Total active connections: ${wss.clients.size}`);
 
+      // Increment active students counter
+      await RedisHelper.incr('quiz:stats:active_students');
+
       // Create new quiz session
-      const session = createQuizSession(ws, studentId);
+      const session = await createQuizSession(ws, studentId);
       activeSessions.set(studentId, session);
 
       // Send welcome message
@@ -376,7 +582,8 @@ export function createWebSocketServer(server) {
          type: 'welcome',
          message: 'Welcome to the MCQ Quiz!',
          studentId: studentId,
-         totalQuestions: mcqQuestions.length,
+         totalQuestions: (await getQuestions()).length,
+         redisConnected: RedisHelper.isConnected(),
          instructions: [
             'You will receive 5 multiple choice questions',
             'Each question has 10 seconds time limit',
@@ -415,7 +622,11 @@ export function createWebSocketServer(server) {
                   break;
 
                case 'ping':
-                  ws.send(JSON.stringify({ type: 'pong' }));
+                  ws.send(JSON.stringify({
+                     type: 'pong',
+                     redisConnected: RedisHelper.isConnected(),
+                     timestamp: new Date().toISOString()
+                  }));
                   break;
 
                default:
@@ -431,36 +642,80 @@ export function createWebSocketServer(server) {
       });
 
       // Handle connection close
-      ws.on('close', () => {
+      ws.on('close', async () => {
          // Clean up timer
          if (session.questionTimer) {
             clearTimeout(session.questionTimer);
          }
+
+         // Remove from in-memory sessions
          activeSessions.delete(studentId);
+
+         // Remove from Redis cache
+         await removeSession(studentId);
+
+         // Decrement active students counter
+         const current = await RedisHelper.get('quiz:stats:active_students') || 1;
+         if (current > 0) {
+            await RedisHelper.set('quiz:stats:active_students', current - 1);
+         }
+
          console.log(`🔌 Student disconnected: ${studentId}`);
          console.log(`👥 Remaining active connections: ${wss.clients.size - 1}`);
       });
 
       // Handle errors
-      ws.on('error', (error) => {
+      ws.on('error', async (error) => {
          console.error(`❌ WebSocket error for ${studentId}:`, error.message);
          // Clean up timer
          if (session.questionTimer) {
             clearTimeout(session.questionTimer);
          }
          activeSessions.delete(studentId);
+         await removeSession(studentId);
       });
    });
 
-   console.log('🚀 WebSocket server initialized');
+   console.log('🚀 WebSocket server initialized with Redis support');
    return wss;
 }
 
 // Get quiz statistics
-export function getQuizStats() {
-   return {
-      activeStudents: activeSessions.size,
-      totalQuestions: mcqQuestions.length,
-      activeSessions: Array.from(activeSessions.keys())
-   };
+export async function getQuizStats() {
+   try {
+      const questions = await getQuestions();
+      const activeStudents = await RedisHelper.get('quiz:stats:active_students') || 0;
+      const totalAttempts = await RedisHelper.get('quiz:stats:total_attempts') || 0;
+      const passed = await RedisHelper.get('quiz:stats:passed') || 0;
+      const averageScore = await RedisHelper.get('quiz:stats:average_score') || 0;
+      const topScores = await getTopScores(5);
+
+      return {
+         activeStudents: Math.max(activeSessions.size, activeStudents), // Use max of in-memory and Redis
+         totalQuestions: questions.length,
+         activeSessions: Array.from(activeSessions.keys()),
+         redisConnected: RedisHelper.isConnected(),
+         statistics: {
+            totalAttempts: totalAttempts,
+            passed: passed,
+            passRate: totalAttempts > 0 ? Math.round((passed / totalAttempts) * 100) : 0,
+            averageScore: averageScore
+         },
+         leaderboard: topScores,
+         cacheInfo: {
+            questionsFromCache: await RedisHelper.exists('quiz:questions'),
+            sessionsCached: activeSessions.size
+         }
+      };
+   } catch (error) {
+      console.error('❌ Error getting quiz stats:', error.message);
+      // Fallback to basic stats
+      return {
+         activeStudents: activeSessions.size,
+         totalQuestions: (await getQuestions()).length,
+         activeSessions: Array.from(activeSessions.keys()),
+         redisConnected: false,
+         error: 'Redis unavailable - using fallback data'
+      };
+   }
 }

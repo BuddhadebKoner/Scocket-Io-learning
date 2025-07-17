@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>Redis Monitoring Dashboard</title>
+   <script src="https://cdn.tailwindcss.com"></script>
+   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+   <style>
+      .status-indicator {
+         animation: pulse 2s infinite;
+      }
+
+      @keyframes pulse {
+
+         0%,
+         100% {
+            opacity: 1;
+         }
+
+         50% {
+            opacity: 0.5;
+         }
+      }
+   </style>
+</head>
+
+<body class="bg-gray-100 min-h-screen">
+   <div class="container mx-auto px-4 py-8">
+      <div class="bg-white rounded-lg shadow-lg p-6 mb-6">
+         <h1 class="text-3xl font-bold text-gray-800 mb-4">🔍 Redis Monitoring Dashboard</h1>
+         <div class="flex items-center space-x-4">
+            <div id="connection-status" class="flex items-center">
+               <div class="w-3 h-3 rounded-full bg-red-500 status-indicator mr-2"></div>
+               <span class="text-sm text-gray-600">Checking connection...</span>
+            </div>
+            <button onclick="refreshData()"
+               class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition-colors">
+               🔄 Refresh
+            </button>
+            <button onclick="autoRefresh()" id="auto-refresh-btn"
+               class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 transition-colors">
+               ▶️ Auto Refresh (5s)
+            </button>
+         </div>
+      </div>
+
+      <!-- Stats Cards -->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+         <div class="bg-white rounded-lg shadow p-6">
+            <h3 class="text-lg font-semibold text-gray-700 mb-2">📚 Questions Cached</h3>
+            <p id="questions-cached" class="text-3xl font-bold text-blue-600">-</p>
+         </div>
+         <div class="bg-white rounded-lg shadow p-6">
+            <h3 class="text-lg font-semibold text-gray-700 mb-2">👥 Active Sessions</h3>
+            <p id="active-sessions" class="text-3xl font-bold text-green-600">-</p>
+         </div>
+         <div class="bg-white rounded-lg shadow p-6">
+            <h3 class="text-lg font-semibold text-gray-700 mb-2">🏆 Leaderboard Entries</h3>
+            <p id="leaderboard-entries" class="text-3xl font-bold text-purple-600">-</p>
+         </div>
+         <div class="bg-white rounded-lg shadow p-6">
+            <h3 class="text-lg font-semibold text-gray-700 mb-2">📊 Total Attempts</h3>
+            <p id="total-attempts" class="text-3xl font-bold text-orange-600">-</p>
+         </div>
+      </div>
+
+      <!-- Main Content Grid -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+         <!-- Redis Keys -->
+         <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-bold text-gray-800 mb-4">🔑 Redis Keys</h2>
+            <div id="redis-keys" class="space-y-3">
+               <div class="loading">Loading keys...</div>
+            </div>
+         </div>
+
+         <!-- Statistics -->
+         <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-bold text-gray-800 mb-4">📈 Quiz Statistics</h2>
+            <div id="quiz-stats" class="space-y-3">
+               <div class="loading">Loading statistics...</div>
+            </div>
+         </div>
+
+         <!-- Leaderboard -->
+         <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-bold text-gray-800 mb-4">🏆 Top Performers</h2>
+            <div id="leaderboard" class="space-y-2">
+               <div class="loading">Loading leaderboard...</div>
+            </div>
+         </div>
+
+         <!-- Real-time Activity -->
+         <div class="bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-bold text-gray-800 mb-4">⚡ Real-time Activity</h2>
+            <div id="realtime-activity" class="space-y-2">
+               <div class="loading">Loading activity...</div>
+            </div>
+         </div>
+      </div>
+
+      <!-- Docker Commands -->
+      <div class="bg-white rounded-lg shadow p-6 mt-6">
+         <h2 class="text-xl font-bold text-gray-800 mb-4">🐳 Docker Redis Commands</h2>
+         <div class="bg-gray-900 text-green-400 p-4 rounded-lg font-mono text-sm space-y-2">
+            <div># View Redis container status</div>
+            <div class="text-yellow-300">docker ps --filter "name=redis"</div>
+            <div># Connect to Redis CLI</div>
+            <div class="text-yellow-300">docker exec -it &lt;redis-container&gt; redis-cli</div>
+            <div># Monitor Redis commands in real-time</div>
+            <div class="text-yellow-300">docker exec -it &lt;redis-container&gt; redis-cli MONITOR</div>
+            <div># View Redis memory usage</div>
+            <div class="text-yellow-300">docker exec -it &lt;redis-container&gt; redis-cli INFO memory</div>
+            <div># List all keys</div>
+            <div class="text-yellow-300">docker exec -it &lt;redis-container&gt; redis-cli KEYS "*"</div>
+         </div>
+      </div>
+   </div>
+
+   <script>
+      const API_BASE = 'http://localhost:3000/api/quiz';
+      let autoRefreshInterval = null;
+
+      async function fetchData(endpoint) {
+         try {
+            const response = await fetch(`${API_BASE}${endpoint}`);
+            return await response.json();
+         } catch (error) {
+            console.error(`Error fetching ${endpoint}:`, error);
+            return { success: false, error: error.message };
+         }
+      }
+
+      async function updateConnectionStatus() {
+         const stats = await fetchData('/stats');
+         const statusEl = document.getElementById('connection-status');
+
+         if (stats.success && stats.data.redisConnected) {
+            statusEl.innerHTML = '<div class="w-3 h-3 rounded-full bg-green-500 status-indicator mr-2"></div><span class="text-sm text-green-600">Redis Connected</span>';
+         } else {
+            statusEl.innerHTML = '<div class="w-3 h-3 rounded-full bg-red-500 status-indicator mr-2"></div><span class="text-sm text-red-600">Redis Disconnected</span>';
+         }
+      }
+
+      async function updateStats() {
+         const stats = await fetchData('/stats');
+         if (stats.success) {
+            document.getElementById('questions-cached').textContent = stats.data.cacheInfo?.questionsFromCache ? 'Yes' : 'No';
+            document.getElementById('active-sessions').textContent = stats.data.activeStudents || 0;
+            document.getElementById('leaderboard-entries').textContent = stats.data.leaderboard?.length || 0;
+            document.getElementById('total-attempts').textContent = stats.data.statistics?.totalAttempts || 0;
+         }
+      }
+
+      async function updateRedisKeys() {
+         const keys = await fetchData('/redis/keys');
+         const container = document.getElementById('redis-keys');
+
+         if (keys.success) {
+            container.innerHTML = `
+                    <div class="space-y-2">
+                        <div class="flex justify-between p-2 bg-gray-50 rounded">
+                            <span class="font-mono text-sm">quiz:questions</span>
+                            <span class="text-xs ${keys.data.questions.exists ? 'text-green-600' : 'text-red-600'}">
+                                ${keys.data.questions.exists ? '✅ EXISTS' : '❌ NOT FOUND'}
+                            </span>
+                        </div>
+                        <div class="flex justify-between p-2 bg-gray-50 rounded">
+                            <span class="font-mono text-sm">quiz:leaderboard</span>
+                            <span class="text-xs text-blue-600">${keys.data.leaderboard.size} entries</span>
+                        </div>
+                        <div class="flex justify-between p-2 bg-gray-50 rounded">
+                            <span class="font-mono text-sm">quiz:stats:*</span>
+                            <span class="text-xs text-purple-600">${Object.keys(keys.data.statistics).length} keys</span>
+                        </div>
+                    </div>
+                `;
+         } else {
+            container.innerHTML = '<div class="text-red-500">Error loading keys</div>';
+         }
+      }
+
+      async function updateQuizStats() {
+         const stats = await fetchData('/stats');
+         const container = document.getElementById('quiz-stats');
+
+         if (stats.success && stats.data.statistics) {
+            const data = stats.data.statistics;
+            container.innerHTML = `
+                    <div class="space-y-3">
+                        <div class="flex justify-between">
+                            <span>Total Attempts:</span>
+                            <span class="font-bold">${data.totalAttempts || 0}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span>Passed:</span>
+                            <span class="font-bold text-green-600">${data.passed || 0}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span>Pass Rate:</span>
+                            <span class="font-bold">${data.passRate || 0}%</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span>Average Score:</span>
+                            <span class="font-bold">${data.averageScore || 0}</span>
+                        </div>
+                    </div>
+                `;
+         } else {
+            container.innerHTML = '<div class="text-gray-500">No statistics available</div>';
+         }
+      }
+
+      async function updateLeaderboard() {
+         const leaderboard = await fetchData('/leaderboard');
+         const container = document.getElementById('leaderboard');
+
+         if (leaderboard.success && leaderboard.data.leaderboard.length > 0) {
+            const entries = leaderboard.data.leaderboard.slice(0, 5).map((entry, index) => `
+                    <div class="flex justify-between items-center p-2 bg-gray-50 rounded">
+                        <div class="flex items-center">
+                            <span class="w-6 h-6 bg-blue-500 text-white rounded-full flex items-center justify-center text-xs mr-2">
+                                ${entry.rank}
+                            </span>
+                            <span class="text-sm">${entry.studentId}</span>
+                        </div>
+                        <span class="font-bold text-blue-600">${entry.percentage}%</span>
+                    </div>
+                `).join('');
+            container.innerHTML = entries;
+         } else {
+            container.innerHTML = '<div class="text-gray-500">No leaderboard data</div>';
+         }
+      }
+
+      async function updateRealTimeActivity() {
+         const realtime = await fetchData('/redis/realtime');
+         const container = document.getElementById('realtime-activity');
+
+         if (realtime.success) {
+            const data = realtime.data;
+            container.innerHTML = `
+                    <div class="space-y-2">
+                        <div class="text-xs text-gray-500">Last updated: ${new Date(data.timestamp).toLocaleTimeString()}</div>
+                        <div class="flex justify-between">
+                            <span>Active Operations:</span>
+                            <span class="font-bold">${data.activeOperations?.sessionsActive || 0}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span>Questions Served:</span>
+                            <span class="font-bold">${data.activeOperations?.questionsServed || 0}</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span>Cache Hit Rate:</span>
+                            <span class="font-bold text-green-600">${data.cacheHitRate?.questions || 0}%</span>
+                        </div>
+                    </div>
+                `;
+         } else {
+            container.innerHTML = '<div class="text-red-500">Error loading real-time data</div>';
+         }
+      }
+
+      async function refreshData() {
+         await Promise.all([
+            updateConnectionStatus(),
+            updateStats(),
+            updateRedisKeys(),
+            updateQuizStats(),
+            updateLeaderboard(),
+            updateRealTimeActivity()
+         ]);
+      }
+
+      function autoRefresh() {
+         const btn = document.getElementById('auto-refresh-btn');
+         if (autoRefreshInterval) {
+            clearInterval(autoRefreshInterval);
+            autoRefreshInterval = null;
+            btn.textContent = '▶️ Auto Refresh (5s)';
+            btn.className = btn.className.replace('bg-red-500', 'bg-green-500');
+         } else {
+            autoRefreshInterval = setInterval(refreshData, 5000);
+            btn.textContent = '⏸️ Stop Auto Refresh';
+            btn.className = btn.className.replace('bg-green-500', 'bg-red-500');
+         }
+      }
+
+      // Initial load
+      refreshData();
+   </script>
+</body>
+
+</html>
