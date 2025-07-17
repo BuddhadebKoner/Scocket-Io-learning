@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+.pnp.*
+.pnp.js
+
+# Environment variables and secrets
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+*.pem
+config.js
+config.json
+credentials.json
+
+# Build and distribution files
+dist/
+build/
+.cache/
+public/dist/
+/out/
+.webpack/
+
+# Logs and debugging
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
